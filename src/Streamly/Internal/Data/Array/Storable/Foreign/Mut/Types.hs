@@ -896,7 +896,10 @@ byteLength Array{..} =
 -- @since 0.7.0
 {-# INLINE length #-}
 length :: forall a. Storable a => Array a -> Int
-length arr = byteLength arr `div` sizeOf (undefined :: a)
+length arr = 
+    case sizeOf (undefined :: a) of 
+        0 -> 0
+        z -> byteLength arr `div` z
 
 {-# INLINE byteCapacity #-}
 byteCapacity :: Array a -> Int

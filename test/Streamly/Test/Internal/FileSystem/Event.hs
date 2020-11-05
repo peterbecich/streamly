@@ -17,7 +17,7 @@ import qualified Streamly.Unicode.Stream as Unicode
 import qualified Streamly.Internal.Data.Array.Storable.Foreign as Array
 import qualified Streamly.Internal.Data.Fold as FL
 import qualified Streamly.Internal.Data.Parser as PR
-import qualified Streamly.Internal.Data.Stream.IsStream as Stream
+import qualified Streamly.Internal.Data.Stream.IsStream as S
 #if defined(CABAL_OS_DARWIN)
 import qualified Streamly.Internal.FileSystem.Event.Darwin as Event
 #elif defined(CABAL_OS_LINUX)
@@ -32,7 +32,7 @@ import qualified Streamly.Internal.FileSystem.Event.Windows as Event
 -- Utilities
 -------------------------------------------------------------------------------
 toUtf8 :: MonadIO m => String -> m (Array Word8)
-toUtf8 = Array.fromStream . Unicode.encodeUtf8' . Stream.fromList
+toUtf8 = Array.fromStream . Unicode.encodeUtf8' . S.fromList
 
 watchPaths :: NonEmpty (Array Word8) -> SerialT IO Event.Event
 watchPaths = Event.watchTrees
@@ -40,38 +40,32 @@ watchPaths = Event.watchTrees
 timeout :: IO String
 timeout = threadDelay 5000000 >> return "Timeout"    
 
-data Sync = Sync (MVar String)
+data Sync = Sync (MVar ())
 
 fseventDir :: String
 fseventDir = "fsevent_dir"
 
-postEvent :: Sync -> ThreadId -> IO String
-postEvent (Sync m) tid = do
-    res <- takeMVar m
-    killThread tid
-    return res 
-
 -------------------------------------------------------------------------------
 -- Event lists to be matched with
 -------------------------------------------------------------------------------
-matchSingleDirs :: [String]
-matchSingleDirs = 
+singleDirEvents :: [String]
+singleDirEvents = 
     [ "dir1Single_1073742080_Dir"
     , "dir1Single_1073741856_Dir"
     , "dir1Single_1073741825_Dir"
     , "dir1Single_1073741840_Dir"
     ]
 
-matchNestedDirs :: [String]
-matchNestedDirs = 
+nestedDirEvents :: [String]
+nestedDirEvents = 
     [ "dir1_1073742080_Dir"
     , "dir1_1073741856_Dir"
     , "dir1_1073741825_Dir"
     , "dir1_1073741840_Dir"
     ]    
 
-matchCreateFiles :: [String]
-matchCreateFiles = 
+createFileEvents :: [String]
+createFileEvents = 
     [ "FileCreated.txt_256"
     , "FileCreated.txt_32"
     , "FileCreated.txt_2"   
@@ -80,79 +74,87 @@ matchCreateFiles =
 -------------------------------------------------------------------------------
 -- Event Watcher
 -------------------------------------------------------------------------------
-eventWatcher ::  Int -> FilePath -> Sync -> Sync -> [String] -> IO ()
-eventWatcher n rootPath (Sync m1) (Sync m2) matchList = do
+checkEvents :: Int -> FilePath -> Sync -> [String] -> IO String
+checkEvents n rootPath (Sync m) matchList = do
     let args = [rootPath]
     paths <- mapM toUtf8 args    
-    putStrLn ("Watch started !!!!!!!!!!!!!!!!!!!! " ++ rootPath)
-    events <- Stream.parse (PR.take n FL.toList) 
-        $ Stream.before (putMVar m1 (""))
+    putStrLn ("Watch started !!!! on Path " ++ rootPath)
+    events <- S.parse (PR.take n FL.toList) 
+        $ S.before (putMVar m ())
         $ watchPaths (NonEmpty.fromList paths)
     let eventStr =  map Event.showEventShort events
     putStrLn $ show (eventStr)    
     if (eventStr == matchList)
     then 
-        putMVar m2 ("PASS")
+        return "PASS"
     else
-        putMVar m2 ("Mismatch")  
+        return "Mismatch"         
 
 -------------------------------------------------------------------------------
 -- FS Event Generators
--------------------------------------------------------------------------------
-fsOpsCreateFileInRootDir :: [String] -> Sync -> Sync -> IO String
-fsOpsCreateFileInRootDir matches sync1@(Sync m1) sync2 = do    
-    withSystemTempDirectory fseventDir $ \fp -> do
-        let tpath = (fp </> "FileCreated.txt")        
-        tid <- forkIO $ eventWatcher 3 fp sync1 sync2 matches
-        _ <- takeMVar m1
-        putStrLn ("create a File  on " ++ fp)
-        writeFile tpath "Test Data"
-        postEvent sync2 tid
- 
-fsOpsCreateSingleDir :: [String] -> Sync -> Sync -> IO String
-fsOpsCreateSingleDir matches sync1@(Sync m1) sync2 = do    
-    withSystemTempDirectory fseventDir $ \fp -> do
-        tid <- forkIO $ eventWatcher 4 fp sync1 sync2 matches
-        _ <- takeMVar m1
-        putStrLn ("CreateDirectory Single!!!!!!!!!!!!! on " ++ fp)
-        createDirectoryIfMissing True (fp </> "dir1Single")
-        postEvent sync2 tid
+------------------------------------------------------------------------------- 
+fsOpsCreateSingleDir :: FilePath -> Sync -> IO String
+fsOpsCreateSingleDir fp (Sync m) = do
+    takeMVar m
+    putStrLn ("Create Single Directory !!!!!!! on " ++ fp)
+    createDirectoryIfMissing True (fp </> "dir1Single")
+    return "Done"   
 
-fsOpsCreateNestedDir :: [String] -> Sync -> Sync -> IO String
-fsOpsCreateNestedDir matches sync1@(Sync m1) sync2 = do    
-    withSystemTempDirectory fseventDir $ \fp -> do
-        tid <- forkIO $ eventWatcher 4 fp sync1 sync2 matches
-        _ <- takeMVar m1
-        putStrLn ("Create Nested Directory !!!!!!!!!!!!! on " ++ fp)
-        createDirectoryIfMissing True (fp </> "dir1" </> "dir2" </> "dir3")
-        postEvent sync2 tid
+fsOpsCreateNestedDir :: FilePath -> Sync -> IO String
+fsOpsCreateNestedDir fp (Sync m) = do    
+    takeMVar m
+    putStrLn ("Create Nested Directory !!!!!!!!!!!!! on " ++ fp)
+    createDirectoryIfMissing True (fp </> "dir1" </> "dir2" </> "dir3")
+    return "Done"
 
-checker :: IO String -> IO (Maybe [Char])
-checker f = Stream.head 
-    $ Stream.yieldM f `Stream.parallelFst` Stream.yieldM timeout
+fsOpsCreateFileInRootDir :: FilePath -> Sync -> IO String
+fsOpsCreateFileInRootDir fp (Sync m) = do                
+    takeMVar m
+    let tpath = (fp </> "FileCreated.txt") 
+    putStrLn ("create a File  on " ++ fp)
+    writeFile tpath "Test Data"
+    return "Done"      
 
-checkerTemplate :: (Sync -> Sync -> IO String) -> IO String
-checkerTemplate fOps = do
+checker :: S.IsStream t =>
+                 Int -> FilePath -> Sync -> [String] -> t IO String
+checker n rootPath synch matchList = 
+    S.yieldM (checkEvents n rootPath synch matchList) 
+    `S.parallelFst` 
+    S.yieldM timeout
+
+driverInit :: IO Sync
+driverInit = do
     hSetBuffering stdout NoBuffering
     pre <- newEmptyMVar
-    post <- newEmptyMVar    
-    res <- checker (fOps (Sync pre) (Sync post))
-    return $ fromJust res   
+    return (Sync pre)
 
 -------------------------------------------------------------------------------
 -- Test Drivers
 -------------------------------------------------------------------------------
 driverCreateSingleDir :: IO String
-driverCreateSingleDir = checkerTemplate 
-    $ fsOpsCreateSingleDir matchSingleDirs
+driverCreateSingleDir = do
+    sync <- driverInit
+    withSystemTempDirectory fseventDir $ \fp -> do
+        res <- S.head ((checker 4 fp sync singleDirEvents) 
+            `S.ahead` S.yieldM (fsOpsCreateSingleDir fp sync))
+        return $ fromJust res
 
 driverCreateNestedDir :: IO String
-driverCreateNestedDir = checkerTemplate 
-    $ fsOpsCreateNestedDir matchNestedDirs
+driverCreateNestedDir = do
+    sync <- driverInit
+    withSystemTempDirectory fseventDir $ \fp -> do
+        res <- S.head ((checker 4 fp sync nestedDirEvents) 
+            `S.ahead` S.yieldM (fsOpsCreateNestedDir fp sync))
+        return $ fromJust res
+
 
 driverCreateFileInRootDir :: IO String
-driverCreateFileInRootDir = checkerTemplate 
-    $ fsOpsCreateFileInRootDir matchCreateFiles        
+driverCreateFileInRootDir = do
+    sync <- driverInit
+    withSystemTempDirectory fseventDir $ \fp -> do
+        res <- S.head ((checker 3 fp sync createFileEvents) 
+            `S.ahead` S.yieldM (fsOpsCreateFileInRootDir fp sync))
+        return $ fromJust res       
 
 -------------------------------------------------------------------------------
 -- Test Cases
@@ -171,6 +173,6 @@ testCreateFileInRootDir = driverCreateFileInRootDir `shouldReturn` "PASS"
 -------------------------------------------------------------------------------
 main :: IO ()
 main = hspec $ do
-    prop "Create a single directory" testCreateSingleDir 
+    prop "Create a single directory2" testCreateSingleDir     
     prop "Create a nested directory" testCreateNestedDir 
     prop "Create a file in root Dir" testCreateFileInRootDir

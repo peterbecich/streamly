@@ -323,6 +323,9 @@ common test-dependencies
     , random            >= 1.0.0 && < 2
     , transformers      >= 0.4   && < 0.6
     , QuickCheck        >= 2.13  && < 2.15
+    , directory         >= 1.2.2 && < 1.4
+    , filepath          >= 1.4.1
+    , temporary         >= 1.3
 
 -- Compilation for coverage builds on CI machines takes too long without -O0
 -- XXX we should use coverage flag for that, -O0 may take too long to run tests
@@ -727,27 +730,11 @@ test-suite version-bounds
   type: exitcode-stdio-1.0
   main-is: version-bounds.hs
 
-test-suite fsevent-notify-test
+test-suite FileSystem.Event
   import: test-options
   type: exitcode-stdio-1.0
   main-is: Streamly/Test/Internal/FileSystem/Event.hs
-  js-sources: jsbits/clock.js
-  hs-source-dirs: test
-  build-depends:
-      streamly
-    , base              >= 4.9   && < 5
-    , hspec             >= 2.0   && < 3
-    , QuickCheck        >= 2.14  && < 2.15
-    , directory         >= 1.2.2 && < 1.4
-    , containers        >= 0.5   && < 0.7
-    , filepath          >= 1.4.1
-    , temporary         >= 1.3
+  hs-source-dirs: test  
   default-language: Haskell2010
-  if os(windows) || os(darwin)
-    buildable: False
-
-executable FileSystem.Event
-  import: test-options
-  main-is: Streamly/Test/FileSystem/Event.hs
-  if !flag(manual-tests)
+  if os(darwin)
     buildable: False

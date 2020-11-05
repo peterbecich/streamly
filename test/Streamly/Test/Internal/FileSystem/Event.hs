@@ -48,6 +48,25 @@ fseventDir = "fsevent_dir"
 -------------------------------------------------------------------------------
 -- Event lists to be matched with
 -------------------------------------------------------------------------------
+#if defined(CABAL_OS_WINDOWS)
+singleDirEvents :: [String]
+singleDirEvents =     
+    [ "dir1Single_1" ]
+
+nestedDirEvents :: [String]
+nestedDirEvents = 
+    [ "dir1_1"
+    , "dir1\\dir2_1"
+    , "dir1\\dir2\\dir3_1"
+    ]
+
+createFileEvents :: [String]
+createFileEvents = 
+    [ "FileCreated.txt_1"
+    , "FileCreated.txt_3"
+    , "FileCreated.txt_3"
+    ]
+#else 
 singleDirEvents :: [String]
 singleDirEvents = 
     [ "dir1Single_1073742080_Dir"
@@ -62,24 +81,26 @@ nestedDirEvents =
     , "dir1_1073741856_Dir"
     , "dir1_1073741825_Dir"
     , "dir1_1073741840_Dir"
-    ]    
-
+    ]  
+   
 createFileEvents :: [String]
 createFileEvents = 
     [ "FileCreated.txt_256"
     , "FileCreated.txt_32"
     , "FileCreated.txt_2"   
     ]
+#endif
 
 -------------------------------------------------------------------------------
 -- Event Watcher
 -------------------------------------------------------------------------------
-checkEvents :: Int -> FilePath -> Sync -> [String] -> IO String
-checkEvents n rootPath (Sync m) matchList = do
+checkEvents :: FilePath -> Sync -> [String] -> IO String
+checkEvents rootPath (Sync m) matchList = do    
     let args = [rootPath]
+        eventCount = length matchList
     paths <- mapM toUtf8 args    
     putStrLn ("Watch started !!!! on Path " ++ rootPath)
-    events <- S.parse (PR.take n FL.toList) 
+    events <- S.parse (PR.take eventCount FL.toList) 
         $ S.before (putMVar m ())
         $ watchPaths (NonEmpty.fromList paths)
     let eventStr =  map Event.showEventShort events
@@ -93,32 +114,29 @@ checkEvents n rootPath (Sync m) matchList = do
 -------------------------------------------------------------------------------
 -- FS Event Generators
 ------------------------------------------------------------------------------- 
-fsOpsCreateSingleDir :: FilePath -> Sync -> IO String
+fsOpsCreateSingleDir :: FilePath -> Sync -> IO ()
 fsOpsCreateSingleDir fp (Sync m) = do
     takeMVar m
     putStrLn ("Create Single Directory !!!!!!! on " ++ fp)
-    createDirectoryIfMissing True (fp </> "dir1Single")
-    return "Done"   
+    createDirectoryIfMissing True (fp </> "dir1Single")       
 
-fsOpsCreateNestedDir :: FilePath -> Sync -> IO String
+fsOpsCreateNestedDir :: FilePath -> Sync -> IO ()
 fsOpsCreateNestedDir fp (Sync m) = do    
     takeMVar m
     putStrLn ("Create Nested Directory !!!!!!!!!!!!! on " ++ fp)
     createDirectoryIfMissing True (fp </> "dir1" </> "dir2" </> "dir3")
-    return "Done"
 
-fsOpsCreateFileInRootDir :: FilePath -> Sync -> IO String
+fsOpsCreateFileInRootDir :: FilePath -> Sync -> IO ()
 fsOpsCreateFileInRootDir fp (Sync m) = do                
     takeMVar m
     let tpath = (fp </> "FileCreated.txt") 
     putStrLn ("create a File  on " ++ fp)
-    writeFile tpath "Test Data"
-    return "Done"      
+    writeFile tpath "Test Data"       
 
 checker :: S.IsStream t =>
-                 Int -> FilePath -> Sync -> [String] -> t IO String
-checker n rootPath synch matchList = 
-    S.yieldM (checkEvents n rootPath synch matchList) 
+                FilePath -> Sync -> [String] -> t IO String
+checker rootPath synch matchList = 
+    S.yieldM (checkEvents rootPath synch matchList) 
     `S.parallelFst` 
     S.yieldM timeout
 
@@ -135,25 +153,39 @@ driverCreateSingleDir :: IO String
 driverCreateSingleDir = do
     sync <- driverInit
     withSystemTempDirectory fseventDir $ \fp -> do
-        res <- S.head ((checker 4 fp sync singleDirEvents) 
-            `S.ahead` S.yieldM (fsOpsCreateSingleDir fp sync))
+        res <- S.head 
+            $ (checker fp sync singleDirEvents) 
+            `S.parallelFst` 
+            S.yieldM  -- ^ this message should follow checker
+            (fsOpsCreateSingleDir fp sync 
+                >> threadDelay 10000000 
+                >> return "fOps Done")
         return $ fromJust res
 
 driverCreateNestedDir :: IO String
 driverCreateNestedDir = do
     sync <- driverInit
     withSystemTempDirectory fseventDir $ \fp -> do
-        res <- S.head ((checker 4 fp sync nestedDirEvents) 
-            `S.ahead` S.yieldM (fsOpsCreateNestedDir fp sync))
+        res <- S.head 
+            $ (checker fp sync nestedDirEvents) 
+            `S.parallelFst` 
+            S.yieldM 
+            (fsOpsCreateNestedDir fp sync 
+                >> threadDelay 10000000 
+                >> return "fOps Done")
         return $ fromJust res
-
 
 driverCreateFileInRootDir :: IO String
 driverCreateFileInRootDir = do
     sync <- driverInit
     withSystemTempDirectory fseventDir $ \fp -> do
-        res <- S.head ((checker 3 fp sync createFileEvents) 
-            `S.ahead` S.yieldM (fsOpsCreateFileInRootDir fp sync))
+        res <- S.head 
+            $ (checker fp sync createFileEvents) 
+            `S.parallelFst` 
+            S.yieldM 
+            (fsOpsCreateFileInRootDir fp sync 
+                >> threadDelay 10000000 
+                >> return "fOps Done")
         return $ fromJust res       
 
 -------------------------------------------------------------------------------
@@ -173,6 +205,6 @@ testCreateFileInRootDir = driverCreateFileInRootDir `shouldReturn` "PASS"
 -------------------------------------------------------------------------------
 main :: IO ()
 main = hspec $ do
-    prop "Create a single directory2" testCreateSingleDir     
+    prop "Create a single directory" testCreateSingleDir     
     prop "Create a nested directory" testCreateNestedDir 
     prop "Create a file in root Dir" testCreateFileInRootDir
